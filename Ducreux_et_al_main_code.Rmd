@@ -1,0 +1,1591 @@
+---
+title: "Embryo article"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+#Loading packages
+
+```{r library, message=FALSE, warning=FALSE}
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(FactoMineR)
+library(ggplot2)
+library(tidyr)
+library(limma)
+library(edgeR)
+library(clusterProfiler)
+library(FactoMineR)
+library(factoextra)
+library(sva)
+library(cowplot)
+library(scater)
+library(reshape)
+library(reshape2)
+library(gridExtra)
+library(org.Hs.eg.db)
+library(DOSE)
+library(enrichplot)
+library(grid)
+library(circlize)
+library(MASS)
+library(gage)
+library(ggnewscale)
+library(ggtern)
+library(openxlsx)
+library(ggtext)
+library(Seurat)
+library(scran)
+library(scater)
+library(ggplot2)
+library(RColorBrewer)
+library(MAST)
+library(SingleCellExperiment)
+library(ggpubr)
+library(clustree)
+library(slingshot)
+library(tradeSeq)
+library(clusterExperiment)
+library(dplyr)
+library(mgcv)
+library(ComplexHeatmap)
+library(phateR)
+library(plotly)
+library(ggpointdensity)
+library(PCAtools)
+library(devtools)
+
+# Set your path for the phate python module
+Sys.setenv(RETICULATE_PYTHON = "your_path/python3")
+reticulate::py_discover_config(required_module="phate")
+reticulate::py_discover_config(required_module="plotly")
+
+source_url("https://raw.githubusercontent.com/BastiDucreux/Single_embryo_RNAseq_paper/main/custom_plotting_functions.R")
+set.seed(100)
+```
+
+```{r, Analysis day2, message=FALSE,echo = FALSE}
+
+# Load day2 counts
+
+cts <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/counts_day2.tsv?raw=true", 
+                  delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+cts=data.frame(cts)
+annotation = cts[,1]
+rownames(cts) = annotation
+cts=cts[,-1]
+
+# Load day2 metadata
+
+coldata=read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/sample_plan_day2.tsv?raw=true", 
+                   delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+coldata=data.frame(coldata)
+rownames(coldata)=coldata$Sample
+
+coldata$Culture_medium <- factor(coldata$Culture_medium)
+coldataD2=coldata # Metadata (we will need it later)
+
+cts <- cts[, rownames(coldata)]
+all(rownames(coldata) == colnames(cts))
+group=coldata$Culture_medium
+
+# Normalisation with edgeR (trimmed mean of M-values)
+
+y <- DGEList(counts=cts, genes=rownames(cts))
+isexpr <- rowSums(edgeR::cpm(y)>1) >= 4
+y <- y[isexpr,]
+dim(y)
+y <- calcNormFactors(y)
+
+# Differential expression with limma-voom
+
+design <- model.matrix(~ 0 + group)
+v <- voom(y,design,plot=FALSE)
+
+fit <- lmFit(v, design)
+contrastMatrix <- cbind("Ferticult-Global"=c(1,-1,0),"Ferticult-SSM"=c(1,0,-1),"SSM-Global"=c(0,-1,1))
+
+fit2 <- contrasts.fit(fit,contrastMatrix)
+fit2.de <- eBayes(fit2)
+
+# Store results
+
+resD2=topTable(fit2.de, coef=1,n = Inf, adjust.method = "BH") # Ferticult - Global comparison
+resFerticultSSM=topTable(fit2.de, coef=2,n = Inf, adjust.method = "BH") # Ferticult - SMM comparison
+resSSMGlobal=topTable(fit2.de, coef=3,n = Inf, adjust.method = "BH") # SSM - Global comparison
+normalized_counts <- edgeR::cpm(y)
+datExpr=t(normalized_counts)
+datExprD2=datExpr  # Normalized counts (we will need it later)
+logcpmD2=edgeR::cpm(y,prior.count=1,log=TRUE)
+
+logCPM=data.frame(rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% c("Ferticult","Global")),])]))
+colnames(logCPM)=c("logCPM")
+resD2=resD2 %>% merge(.,logCPM,by=0)
+rownames(resD2)=resD2[,1]
+resD2=resD2[,-1]
+
+logCPM=data.frame(rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% c("Ferticult","SSM")),])]))
+colnames(logCPM)=c("logCPM")
+resFerticultSSM=resFerticultSSM %>% merge(.,logCPM,by=0)
+rownames(resFerticultSSM)=resFerticultSSM[,1]
+resFerticultSSM=resFerticultSSM[,-1]
+
+logCPM=data.frame(rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% c("SSM","Global")),])]))
+colnames(logCPM)=c("logCPM")
+resSSMGlobal=resSSMGlobal %>% merge(.,logCPM,by=0)
+rownames(resSSMGlobal)=resSSMGlobal[,1]
+resSSMGlobal=resSSMGlobal[,-1]
+
+list_of_datasets <- list("Ferticult - Global" = resD2, "Ferticult - SSM" = resFerticultSSM, "SSM - Global" = resSSMGlobal)
+openxlsx::write.xlsx(list_of_datasets, file = "Supplementary Table S2.xlsx")
+```
+
+```{r, Analysis day5, message=FALSE,echo = FALSE}
+
+# Load day5 counts
+
+cts <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/counts_day5.tsv?raw=true", 
+                  delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+cts=data.frame(cts)
+annotation = cts[,1]
+rownames(cts) = annotation
+cts=cts[,-1]
+
+# Load day5 metadata
+
+coldata=read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/sample_plan_day5.tsv?raw=true", 
+                   delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+coldata=data.frame(coldata)
+rownames(coldata)=coldata$Sample
+
+coldata$Culture_medium <- factor(coldata$Culture_medium,levels=c("Global_Global","Ferticult_Global","Global_Global_met"))
+coldata$Couple=factor(coldata$Couple)
+coldataD5=coldata # Metadata (we will need it later)
+
+cts <- cts[, rownames(coldata)]
+all(rownames(coldata) == colnames(cts))
+group=coldata$Culture_medium
+couple = coldata$Couple
+
+# Normalisation with edgeR (trimmed mean of M-values)
+
+y <- DGEList(counts=cts, genes=rownames(cts))
+isexpr <- rowSums(edgeR::cpm(y)>1) >= 4
+y <- y[isexpr,]
+dim(y)
+y <- calcNormFactors(y)
+
+# Differential expression with limma-voom
+
+design <- model.matrix(~ 0 + group)
+v <- voom(y,design,plot=FALSE)
+
+dupcor <- duplicateCorrelation(v,design,block=couple)
+v <- voom(y, design = design, plot = FALSE,block=couple,correlation=dupcor$consensus.correlation)
+dupcor <- duplicateCorrelation(v,design,block=couple)
+fit <- lmFit(v, design = design,block=couple,correlation=dupcor$consensus.correlation)
+
+contrastMatrix=makeContrasts(groupGlobal_Global_met-groupGlobal_Global,groupFerticult_Global-groupGlobal_Global,levels=design)
+
+fit2 <- contrasts.fit(fit,contrastMatrix)
+fit2.de <- eBayes(fit2)
+
+# Store results
+
+resD5=topTable(fit2.de,coef=2,n = Inf, adjust.method = "BH",sort.by="p") # Ferticult - Global comparison
+resMeth=topTable(fit2.de,coef=1,n = Inf, adjust.method = "BH",sort.by="p") # Global - Global_met comparison
+normalized_counts <- edgeR::cpm(y)
+datExpr=t(normalized_counts)
+datExprD5=datExpr # Normalized counts (we will need it later)
+logcpmD5=edgeR::cpm(y,prior.count=1,log=TRUE)
+
+logCPM=data.frame(rowMeans(logcpmD5))
+colnames(logCPM)=c("logCPM")
+resD5=resD5 %>% merge(.,logCPM,by=0)
+rownames(resD5)=resD5[,1]
+resD5=resD5[,-1]
+
+list_of_datasets <- list("Ferticult - Global" = resD5, "Global - Global+Methionine" = resMeth)
+openxlsx::write.xlsx(list_of_datasets, file = "Supplementary Table S4.xlsx")
+```
+
+```{r,Yan loading}
+
+# Load Yan et al. (2013) counts
+
+cts <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/counts_Yan.tsv?raw=true", 
+                  delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+cts=data.frame(cts)
+annotation = cts[,1]
+rownames(cts) = annotation
+cts=cts[,-1]
+
+# Load Yan et al. (2013) metadata
+
+coldata=read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/sample_plan_Yan.tsv?raw=true", 
+                   delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+
+coldata=coldata[!(coldata$Cell%in%c("hESC passage#0","hESC passage#10","human embryonic stem cell")),] # Remove embryonic stem cell
+cts=cts[,coldata$ID]
+coldata=data.frame(coldata)
+rownames(coldata)=coldata$ID
+coldata$condition <- factor(coldata$Cell)
+coldataYan=coldata
+
+cell=coldata$Cell
+names(cell)=coldata$ID
+
+# Normalisation with edgeR (trimmed mean of M-values)
+
+y <- DGEList(counts=cts, genes=rownames(cts))
+isexpr <- rowSums(edgeR::cpm(y)>1) >= 4
+y <- y[isexpr,]
+dim(y)
+y <- calcNormFactors(y)
+
+# Store results
+
+normalized_counts <- edgeR::cpm(y)
+datExpr=t(normalized_counts)
+datExprYan=datExpr # Normalized counts (we will need it later)
+logcpmYan=edgeR::cpm(y,prior.count=1,log=TRUE)
+
+```
+
+```{r Xue loading}
+
+# Load Xue et al. (2013) counts
+
+cts <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/counts_Xue.tsv?raw=true", 
+                  delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+cts=data.frame(cts)
+annotation = cts[,1]
+rownames(cts) = annotation
+cts=cts[,-1]
+
+# Load Xue et al. (2013) metadata
+
+coldata=read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/sample_plan_Xue.tsv?raw=true", 
+                   delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+coldata=coldata[!(coldata$Cell%in%c("Pronuclei")),] # Remove pronuclei
+cts=cts[,coldata$ID]
+coldata=data.frame(coldata)
+rownames(coldata)=coldata$ID
+coldata$condition <- factor(coldata$Cell)
+coldataXue=coldata
+
+cell=coldata$Cell
+names(cell)=coldata$ID
+
+# Normalisation with edgeR (trimmed mean of M-values)
+
+y <- DGEList(counts=cts, genes=rownames(cts))
+isexpr <- rowSums(edgeR::cpm(y)>1) >= 4
+y <- y[isexpr,]
+dim(y)
+y <- calcNormFactors(y)
+
+# Store results
+
+normalized_counts <- edgeR::cpm(y)
+datExpr=t(normalized_counts)
+datExprXue=datExpr # Normalized counts (we will need it later)
+logcpmXue=edgeR::cpm(y,prior.count=1,log=TRUE)
+
+```
+
+
+```{r Figure 2A : Volcanoplot D2 ,echo=FALSE,fig.width=8,fig.height=6}
+
+# Color DEG D2
+
+DEGD2=resD2[resD2$adj.P.Val<0.1,]
+data <- data.frame(resD2) %>% 
+  mutate(
+    Expression = case_when(logFC >= 0 & adj.P.Val <= 0.1 ~ "Up-regulated",
+                           logFC <= 0 & adj.P.Val <= 0.1 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+  )
+data=data[complete.cases(data),]
+
+# Plot
+
+p2 <- ggplot(data, aes(logFC, -log(P.Value,10))) +
+  geom_point(aes(color = Expression), size = 2) +
+  xlab(expression("log"[2]*"FC (Ferticult - Global)")) + 
+  ylab(expression("-log"[10]*" "*italic(p)*"-value")) +
+  scale_color_manual(values = c("red", "gray50","green"),
+                     labels = c("Down-regulated","Unchanged","Up-regulated")) +
+  guides(colour = guide_legend(override.aes = list(size=3))) 
+Fig2A=p2+theme_bw()+ 
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(3,0,10,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,3,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+labs(color="Expression with Ferticult")
+```
+
+```{r Figure 2B : Top-10 DEGs dotplot ,echo=FALSE,fig.width=8,fig.height=6}
+
+# Color DEG D2
+
+padj_cutoff <- 0.1
+sig_res <- dplyr::filter(resD2, adj.P.Val < padj_cutoff) %>%
+  dplyr::arrange(logFC)
+normalized_counts <- logcpmD2
+top_sig_norm <- data.frame(normalized_counts) %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::filter(gene %in% rownames(sig_res[order(sig_res$adj.P.Val),] %>% head(n=10))) %>% dplyr::select(c("gene",rownames(coldataD2[coldataD2$Culture_medium==c("Global")|coldataD2$Culture_medium==c("Ferticult"),])))
+gathered_top_sig <- top_sig_norm %>%
+  gather(colnames(top_sig_norm)[2:length(colnames(top_sig_norm))], key = "samplename", value = "normalized_counts")
+gathered_top_sig <- inner_join(coldataD2[, c("Culture_medium", "Sample" )], gathered_top_sig, by = c("Sample" = "samplename"))
+gathered_top_sig$gene=factor(gathered_top_sig$gene,levels=sig_res[order(sig_res$logFC),]$genes)
+Fig2B=ggplot(gathered_top_sig) +
+  geom_point(aes(x = gene, 
+                 y = normalized_counts,
+                 color=Culture_medium), 
+             position=position_jitter(w=0,h=0)) +
+  scale_color_manual(values = c("Ferticult" = "#E37B72",
+                               "Global"="#5BB058")) +
+  theme_bw()+ xlab("Genes")+ylab(expression("log"[2]*" (CPM+1)"))+labs(color="Culture medium until day-2")+
+  theme(axis.title.x=element_text(size=15,margin=margin(0,0,0,0)))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(angle=45,hjust=1,size=10,face="italic",margin=margin(2,0,0,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,1,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+
+  stat_summary(
+    fun = mean, 
+    geom = "errorbar", 
+    aes(x=gene,y = normalized_counts,
+        color=Culture_medium,ymax = ..y.., ymin = ..y..), 
+    position = position_dodge(width = 0), 
+    width = 1.75,size=1)
+```
+
+```{r Figure 3C : GSEA D2 ,echo=FALSE,fig.width=5.5,fig.height=4.5}
+
+# Convert to ENTREZID and sort by logFC
+
+entrez=bitr(rownames(resD2),fromType = "SYMBOL",toType = "ENTREZID",OrgDb = org.Hs.eg.db)
+geneList=merge(resD2,entrez,by.x=0,by.y="SYMBOL")
+geneList2=geneList$logFC
+names(geneList2)=geneList$ENTREZID
+geneList2 = sort(geneList2, decreasing = TRUE)
+
+# GSEA
+
+GSEAres <- clusterProfiler::gseGO(
+  geneList2,
+  pAdjustMethod = "fdr",
+  pvalueCutoff = 0.05, #p.adjust cutoff
+  OrgDb = org.Hs.eg.db,
+  ont="BP")
+Fig3C=gseaplot2_custom(GSEAres, geneSetID=1:10 ,order= c("anterior/posterior pattern specification","regionalization","pattern specification process","regulation of cell cycle phase transition","regulation of mitotic cell cycle phase transition","DNA repair","cell cycle G2/M phase transition"  ,"protein-containing complex localization","regulation of G2/M transition of mitotic cell cycle"   ,"regulation of cell cycle G2/M phase transition"), pvalue_table = FALSE, ES_geom = "dot", base_size = 15,subplots=1:2,rel_heights = c(1, 0.5))
+
+Fig3Clegend=gseaplot2_custom_legend(GSEAres, order= c("anterior/posterior pattern specification","regionalization","pattern specification process","regulation of cell cycle phase transition","regulation of mitotic cell cycle phase transition","DNA repair","cell cycle G2/M phase transition"  ,"protein-containing complex localization","regulation of G2/M transition of mitotic cell cycle"   ,"regulation of cell cycle G2/M phase transition"),geneSetID = 1:10, pvalue_table = FALSE, ES_geom = "dot", base_size = 15,subplots=1:2,rel_heights = c(1, 0.5))
+
+# Save results
+
+openxlsx::write.xlsx(list(GSEAres@result), file = "Supplementary Table S3.xlsx")
+```
+
+```{r Figure 4A : Analysis D2 Imprinted/TE,echo=FALSE,fig.width=9,fig.height=4}
+
+# Import chromatin_modifiers database and separate by categories
+
+Chromatin_modifiers <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/Chromatin%20modifiers.tsv?raw=true",delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+Heterochromatin=data.frame(Chromatin_modifiers)%>% filter(Role %in% c("Facultative heterochromatin","Constitutive heterochromatin","General chromatin"))
+Methylation=data.frame(Chromatin_modifiers)%>% filter(Role %in% c("DNA methylation writer","DNA methylation reader"))
+Histone=data.frame(Chromatin_modifiers)%>% filter(Role %in% c("Histone modifications writer","Histone modifications reader","Histone modifications eraser"))
+Remodelling=data.frame(Chromatin_modifiers)%>% filter(Role %in% c("Remodelling complexes ATPases","Remodelling complexes subunits"))
+
+# Check missing genes
+
+setdiff(Heterochromatin$Gene,rownames(cts))
+setdiff(Methylation$Gene,rownames(cts))
+setdiff(Histone$Gene,rownames(cts))
+setdiff(Remodelling$Gene,rownames(cts))
+
+# Check which DEGs are chromatin modifiers
+
+intersect(resD2[which(resD2$adj.P.Val<0.1),]$genes,Chromatin_modifiers$Gene)
+intersect(resFerticultSSM[which(resFerticultSSM$adj.P.Val<0.1),]$genes,Chromatin_modifiers$Gene)
+intersect(resSSMGlobal[which(resSSMGlobal$adj.P.Val<0.1),]$genes,Chromatin_modifiers$Gene)
+
+# Plot
+
+Fig4A=plot_grid(
+resD2 %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resD2, genes %in% Heterochromatin$Gene),color="purple") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)+ 
+ ggtitle("Ferticult-Global") +
+ theme(plot.title = element_text(hjust = -0.1, vjust=1,face="bold"))
+,
+resD2 %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resD2, genes %in% Methylation$Gene),color="orange") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+resD2 %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resD2, genes %in% Histone$Gene),color="darkblue") +  geom_point(data=filter(resD2, genes %in% c("SETDB1","AURKA")),color="red")+ theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)+ 
+  geom_text(data=filter(resD2, genes %in% c("SETDB1")),
+                  aes(label=genes,fontface=2),position=position_nudge(x=-2.5,y=0),color="red")+
+  geom_text(data=filter(resD2, genes %in% c("AURKA")),
+                  aes(label=genes,fontface=2),position=position_nudge(x=2.3,y=0),color="red")
+,
+resD2 %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resD2, genes %in% Remodelling$Gene),color="grey17") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+resFerticultSSM %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resFerticultSSM, genes %in% Heterochromatin$Gene),color="purple") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)+
+   ggtitle("Ferticult-SSM") +
+ theme(plot.title = element_text(hjust = -0.1, vjust=1,face="bold"))
+,
+resFerticultSSM %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resFerticultSSM, genes %in% Methylation$Gene),color="orange") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+resFerticultSSM %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resFerticultSSM, genes %in% Histone$Gene),color="darkblue") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+resFerticultSSM %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resFerticultSSM, genes %in% Remodelling$Gene),color="grey17") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+resSSMGlobal %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resSSMGlobal, genes %in% Heterochromatin$Gene),color="purple") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)+
+   ggtitle("SSM-Global") +
+ theme(plot.title = element_text(hjust = -0.1, vjust=1,face="bold"))
+,
+resSSMGlobal %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resSSMGlobal, genes %in% Methylation$Gene),color="orange") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+resSSMGlobal %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resSSMGlobal, genes %in% Histone$Gene),color="darkblue") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+resSSMGlobal %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resSSMGlobal, genes %in% Remodelling$Gene),color="grey17") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5)
+,
+ncol = 4, nrow = 3,align = "hv")
+
+```
+
+```{r Figure 4B : Imprinted genes, fig.width=5,fig.height=2}
+
+# Load list of imprinted genes (from Pervjakova et al., 2016)
+
+imprinted_genes <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/imprinted_genes.tsv?raw=true",delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+
+setdiff(imprinted_genes$Imprinted_genes,rownames(cts))
+intersect(resD2[which(resD2$adj.P.Val<0.1),]$genes,imprinted_genes$Imprinted_genes)
+
+# Plot
+
+Fig4B=plot_grid(
+resD2 %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resD2, genes %in% imprinted_genes$Imprinted_genes),color="orange") +   geom_point(data=filter(resD2, genes %in% c("CDKN1C")),color="red")+theme_bw()+ 
+  geom_text(data=filter(resD2, genes %in% c("CDKN1C")),
+                  aes(label=genes,fontface=2),position=position_nudge(x=2,y=0),color="red")+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-4,5.5)+ 
+ ggtitle("Ferticult-Global") +
+ theme(plot.title = element_text(hjust = 0.5, vjust=1,face="bold"))
+,
+resFerticultSSM %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resFerticultSSM, genes %in% imprinted_genes$Imprinted_genes),color="orange") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-5,5.5)+ 
+ ggtitle("Ferticult-SSM") +
+ theme(plot.title = element_text(hjust = 0.5, vjust=1,face="bold"))
+,
+resSSMGlobal %>% ggplot(aes(x=logCPM,y=logFC)) + geom_point(color="grey70")+  geom_point(data=filter(resSSMGlobal, genes %in% imprinted_genes$Imprinted_genes),color="orange") + theme_bw()+
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("log"[2]*" mean expression"))+xlim(-2.5,17.5)+ylim(-5,5.5)+ 
+ ggtitle("SSM-Global") +
+ theme(plot.title = element_text(hjust = 0.5, vjust=1,face="bold"))
+,
+ncol = 3, nrow = 1,align = "hv")
+
+```
+
+
+```{r Figure 5,echo=FALSE,fig.width=8,fig.height=6}
+
+# Volcanoplot D5
+
+DEGD5=resD5[resD5$adj.P.Val<0.1,]
+data <- data.frame(resD5) %>% 
+  mutate(
+    Expression = case_when(logFC >= 0 & adj.P.Val <= 0.1 ~ "Up-regulated",
+                           logFC <= 0 & adj.P.Val <= 0.1 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+  )
+data=data[complete.cases(data),]
+Fig5A <- ggplot(data, aes(logFC, -log(P.Value,10))) +
+  geom_point(aes(color = Expression), size = 2) +
+  xlab(expression("log"[2]*"FC (Ferticult-Global)")) + labs(color="Expression with Ferticult")+
+  ylab(expression("-log"[10]*" "*italic(p)*"-value")) +
+  scale_color_manual(values = c( "gray50","green")) +
+  guides(colour = guide_legend(override.aes = list(size=3)))+theme_bw()+ 
+  theme(axis.title.x=element_text(size=15,margin=margin(0,0,0,0)))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(3,0,10,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,3,0,10)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))
+
+# Expression of DEG D5
+
+padj_cutoff <- 0.1
+sig_res <- dplyr::filter(resD5, adj.P.Val < padj_cutoff) %>%
+  dplyr::arrange(logFC)
+normalized_counts <- logcpmD5
+top_sig_norm <- data.frame(normalized_counts) %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::filter(gene %in% rownames(sig_res)) %>% dplyr::select(c("gene",rownames(coldataD5[coldataD5$Culture_medium_D2==c("Global")|coldataD5$Culture_medium_D2==c("Ferticult"),])))
+gathered_top_sig <- top_sig_norm %>%
+  gather(colnames(top_sig_norm)[2:length(colnames(top_sig_norm))], key = "samplename", value = "normalized_counts")
+gathered_top_sig <- inner_join(coldataD5[, c("Culture_medium_D2", "Sample" )], gathered_top_sig, by = c("Sample" = "samplename"))
+gathered_top_sig$gene=factor(gathered_top_sig$gene,levels=sig_res[order(sig_res$logFC),]$genes)
+Fig5B=ggplot(gathered_top_sig) +
+  geom_point(aes(x = gene, 
+                 y = normalized_counts,
+                 color=Culture_medium_D2), 
+             position=position_jitter(w=0,h=0)) +
+  scale_color_manual(values = c("Ferticult" = "#E37B72",
+                               "Global"="#5BB058")) +
+  theme_bw()+ xlab("Genes")+ylab(expression("log"[2]*" (CPM+1)"))+labs(color="Culture medium until day-2")+
+  theme(axis.title.x=element_text(size=15,margin=margin(0,0,0,0)))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(angle=45,hjust=1,size=10,face="italic",margin=margin(2,0,0,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,1,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+
+  stat_summary(
+    fun = mean, 
+    geom = "errorbar", 
+    aes(x=gene,y = normalized_counts,
+        color=Culture_medium_D2,ymax = ..y.., ymin = ..y..), 
+    position = position_dodge(width = 0), 
+    width = 1.75,size=1)
+
+```
+
+```{r Figure 5D and 5E Circleplot D2 D5 ,echo=FALSE,fig.width=8,fig.height=6}
+
+# Expression data for up-regulated DEG D2
+
+UPgenes=rownames(resD2[resD2$adj.P.Val<0.1 & resD2$logFC>0,])
+
+dataD2=data.frame("log"=resD2[UPgenes,]$logFC,
+                  "expr"=rowMeans(logcpmD2[UPgenes,]),
+                  "time"=rep("D2",length(resD2[UPgenes,]$logFC)))%>%
+  rownames_to_column(var = "gene")
+
+dataD5=rbind(data.frame("log"=resD5[intersect(resD5$genes,UPgenes),]$logFC,
+                  "expr"=rowMeans(logcpmD5[intersect(resD5$genes,UPgenes),]),
+                  "time"=rep("D5",length(intersect(resD5$genes,UPgenes))))%>%
+  rownames_to_column(var = "gene")
+,
+
+data.frame("log"=rep(NA,length(setdiff(UPgenes,resD5$genes))),
+             "expr"=rep(0,length(setdiff(UPgenes,resD5$genes))),
+             "time"=rep("D5",length(setdiff(UPgenes,resD5$genes))),row.names=setdiff(UPgenes,resD5$genes))%>%
+  rownames_to_column(var = "gene"))
+                  
+dataspace=data.frame("log"=rep(0,length(resD2[UPgenes,]$logFC)),
+                  "expr"=rep(0,length(resD2[UPgenes,]$logFC)),
+                  "time"=rep("space",length(resD2[UPgenes,]$logFC)),row.names = UPgenes)%>%
+  rownames_to_column(var = "gene")
+                  
+dataCircle=rbind(dataD2,dataD5,dataspace)
+
+
+# Polar coordinates
+
+dataCircle$var2=NA
+dataCircle[dataCircle$time == "D2",]$var2 = 6.8
+dataCircle[dataCircle$time == "space",]$var2 = 7.5
+dataCircle[dataCircle$time == "D5",]$var2 = 8.2
+dataCircle$gene=factor(dataCircle$gene,levels=dataCircle[order(dataD2$log),]$gene)
+data.labs2 <- subset(dataCircle, time == "D2")
+data.labs2$ang <- seq(from=(360/nrow(data.labs2))/1.5, 
+                     to=(1.5* (360/nrow(data.labs2)))-360, 
+                     length.out=nrow(data.labs2))+80
+data.labs2$hjust <- 0
+data.labs2$hjust[which(data.labs2$ang < -90)] <- 1
+data.labs2$ang[which(data.labs2$ang < -90)] <- (180+data.labs2$ang)[which(data.labs2$ang < -90)]
+
+# Plot
+
+Fig5D <- ggplot( ) +
+    geom_tile(data=dataCircle[dataCircle$time == "space",],
+            aes(x=gene,y=var2),
+            colour="black") +
+  geom_tile(data=dataCircle[dataCircle$time=="D2",],
+            aes(x=gene,y=var2, fill=log),
+            colour="white")+
+  scale_fill_gradient2(midpoint=0, mid="white",
+                       low=rgb(204/255,102/255,119/255),
+                       high=rgb(17/255,119/255,51/255),na.value = "lightgrey",name=expression("log"[2]*"FC")) +
+  ylim(c(0, max(dataCircle$var2) + 1.5))  +
+  coord_polar(theta="x")+
+  theme(panel.background = element_blank(), # bg of the panel
+        panel.grid.major = element_blank(), # get rid of major grid
+        panel.grid.minor = element_blank(), # get rid of minor grid
+        axis.title=element_blank(),
+        panel.grid=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks=element_blank(),
+        axis.text.y=element_text(size=0)) +
+  geom_text(data=data.labs2, 
+            aes(x=as.numeric(rownames(data.labs2)), 
+                y=var2+2, 
+                label=gene, angle=ang, hjust=hjust), 
+            size=2.5) +
+
+  geom_tile(data=dataCircle[dataCircle$time == "D5",],
+            aes(x=gene,y=var2, fill=log),
+            colour="white") 
+# Expression data for down-regulated DEG D2
+
+DOWNgenes=rownames(resD2[resD2$adj.P.Val<0.1 & resD2$logFC<0,])
+
+dataD2=data.frame("log"=resD2[DOWNgenes,]$logFC,
+                  "expr"=rowMeans(logcpmD2[DOWNgenes,]),
+                  "time"=rep("D2",length(resD2[DOWNgenes,]$logFC)))%>%
+  rownames_to_column(var = "gene")
+
+dataD5=rbind(data.frame("log"=resD5[intersect(resD5$genes,DOWNgenes),]$logFC,
+                  "expr"=rowMeans(logcpmD5[intersect(resD5$genes,DOWNgenes),]),
+                  "time"=rep("D5",length(intersect(resD5$genes,DOWNgenes))))%>%
+  rownames_to_column(var = "gene")
+,
+
+data.frame("log"=rep(NA,length(setdiff(DOWNgenes,resD5$genes))),
+             "expr"=rep(0,length(setdiff(DOWNgenes,resD5$genes))),
+             "time"=rep("D5",length(setdiff(DOWNgenes,resD5$genes))),row.names=setdiff(DOWNgenes,resD5$genes))%>%
+  rownames_to_column(var = "gene"))
+
+dataspace=data.frame("log"=rep(0,length(resD2[DOWNgenes,]$logFC)),
+                  "expr"=rep(0,length(resD2[DOWNgenes,]$logFC)),
+                  "time"=rep("space",length(resD2[DOWNgenes,]$logFC)),row.names = DOWNgenes)%>%
+  rownames_to_column(var = "gene")
+                  
+dataCircle=rbind(dataD2,dataD5,dataspace)
+
+
+# Polar coordinates
+
+dataCircle$var2=NA
+dataCircle[dataCircle$time == "D2",]$var2 = 6.8
+dataCircle[dataCircle$time == "space",]$var2 = 7.5
+dataCircle[dataCircle$time == "D5",]$var2 = 8.2
+dataCircle$gene=factor(dataCircle$gene,levels=dataCircle[order(dataD2$log),]$gene)
+data.labs <- subset(dataCircle, time == "D2")
+data.labs$ang <- seq(from=(360/nrow(data.labs))/1.5, 
+                     to=(1.5* (360/nrow(data.labs)))-360, 
+                     length.out=nrow(data.labs))+80
+data.labs$hjust <- 0
+data.labs$hjust[which(data.labs$ang < -90)] <- 1
+data.labs$ang[which(data.labs$ang < -90)] <- (180+data.labs$ang)[which(data.labs$ang < -90)]
+
+# Plot
+
+Fig5E <- ggplot( ) +
+    geom_tile(data=dataCircle[dataCircle$time == "space",],
+            aes(x=gene,y=var2),
+            colour="black") +
+  geom_tile(data=dataCircle[dataCircle$time=="D2",],
+            aes(x=gene,y=var2, fill=log),
+            colour="white")+
+  scale_fill_gradient2(midpoint=0, mid="white",
+                       low=rgb(204/255,102/255,119/255),
+                       high=rgb(17/255,119/255,51/255),na.value = "lightgrey",name=expression("log"[2]*"FC")) +
+  ylim(c(0, max(dataCircle$var2) + 1.5))  +
+  coord_polar(theta="x")+
+  theme(panel.background = element_blank(), # bg of the panel
+        panel.grid.major = element_blank(), # get rid of major grid
+        panel.grid.minor = element_blank(), # get rid of minor grid
+        axis.title=element_blank(),
+        panel.grid=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks=element_blank(),
+        axis.text.y=element_text(size=0)) +
+  geom_text(data=data.labs, 
+            aes(x=as.numeric(rownames(data.labs)), 
+                y=var2+2, 
+                label=gene, angle=ang, hjust=hjust), 
+            size=2.5) +
+
+  geom_tile(data=dataCircle[dataCircle$time == "D5",],
+            aes(x=gene,y=var2, fill=log),
+            colour="white") 
+
+# Plot together
+
+Fig5DE=plot_grid(Fig5D,Fig5E,ncol = 2, nrow = 1)
+```
+
+```{r Pseudotime analysis (performed on HPC)}
+Petropoulos_counts <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/counts_Petropoulos.tsv?raw=true",delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+Petropoulos_counts=data.frame(Petropoulos_counts)
+rownames(Petropoulos_counts)=Petropoulos_counts$Geneid
+Petropoulos_counts=Petropoulos_counts[,-1]
+
+isexpr <- rowSums(edgeR::cpm(Petropoulos_counts)>10) >= 100
+Petropoulos_counts=Petropoulos_counts[isexpr,]
+
+cts <- CreateSeuratObject(Petropoulos_counts, project = "Petropoulos")
+
+# Export to a SingleCellExperiment object 
+sce <- as.SingleCellExperiment(cts)
+
+# Pre-cluster cells
+qclust <- scran::quickCluster(sce, min.size = 30)
+
+# Compute size factors 
+sce <- scran::computeSumFactors(sce, clusters = qclust)
+sce <- scater::logNormCounts(sce)
+
+# Convert to Seurat object 
+cts <- as.Seurat(sce, counts = "counts", data = "logcounts")
+
+# Scale and regress variable on total RNA
+cts <- ScaleData(cts, vars.to.regress = "nCount_RNA", features = rownames(Petropoulos_counts))
+
+# Run PCA
+cts=FindVariableFeatures(cts)
+cts <- RunPCA(object = cts, verbose = FALSE)
+
+
+# Load metadata
+
+coldata=read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/sample_plan_Petropoulos.tsv?raw=true",delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+coldata=data.frame(coldata)
+rownames(coldata)=coldata$ENA_RUN
+Meta_Meistermann <- read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/sample_plan_Meistermann.tsv?raw=true",delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+
+rownames(Meta_Meistermann)=Meta_Meistermann$FastqName
+Meta_Meistermann=data.frame(Meta_Meistermann)
+
+# Extract data
+data <- cts@assays[["RNA"]]@data
+
+# Run PHATE on three dimensions
+phate_output <- phate(t(data),ndim=3)
+clusters_phate=cluster_phate(phate_output)
+# Add phate result to seurat object
+phate_output <- as.matrix(phate_output)
+colnames(x = phate_output) <- paste0("PHATE_", 1:ncol(x = phate_output))
+phate.reduction <- CreateDimReducObject(
+  embeddings = phate_output,
+  key = "PHATE_",
+  assay = "RNA")
+cts@reductions$phate <- phate.reduction
+
+
+# Export to a SingleCellExperiment object 
+sce <- as.SingleCellExperiment(cts, assay = "RNA")
+
+# Infer trajectories
+sce <- slingshot(sce, reducedDim = 'PHATE', clusterLabels = clusters_phate)
+
+# Infer lineages
+lin <- getLineages(SlingshotDataSet(sce), clusterLabels = clusters_phate)
+crv <- getCurves(lin)
+
+# Compare with previous studies
+DATA=merge(reducedDims(sce)$PHATE,Meta_Meistermann,by.x=0,by.y="FastqName",all=T)
+
+# Compute pseudotime
+pseudotime <- slingPseudotime(crv, na = FALSE)
+cellWeights <- slingCurveWeights(crv)
+
+# Extract counts data
+counts <- as.matrix(cts@assays[["RNA"]]@counts)
+
+
+#Fit NB-GAM
+sce_GAM_all_genes <- fitGAM(counts = counts, sds = crv, nknots = 6, verbose = FALSE)
+
+#Differential expression analysis along pseudotime
+assoRes <- associationTest(sce_GAM_all_genes)
+```
+
+```{r Supplementary Figure S7 : PHATE reduction ,echo=FALSE,fig.width=17,fig.height=9}
+
+# Performed on HPC
+
+data_phate<- cts@assays[["RNA"]]@data
+
+# Reorder k-means clusters 
+
+clusters_phate2=clusters_phate
+old <- 0:7
+new <- c("Cluster 5","Cluster 2","Cluster 8","Cluster 3","Cluster 7","Cluster 1","Cluster 4","Cluster 6")
+clusters_phate2[clusters_phate2 %in% old] <- new[match(clusters_phate2, old, nomatch = 0)]
+clusters_phate2=factor(clusters_phate2,levels=c("Cluster 1","Cluster 2","Cluster 3","Cluster 4","Cluster 5","Cluster 6","Cluster 7","Cluster 8"))
+
+# Some visualization parameters (curves, view)
+
+curve_i1 <- slingCurves(crv)[[1]]
+curve_i1 <- curve_i1$s[curve_i1$ord, seq_len(3)]
+colnames(curve_i1) <- c("dim1", "dim2","dim3")
+
+curve_i2 <- slingCurves(crv)[[2]]
+curve_i2 <- curve_i2$s[curve_i2$ord, seq_len(3)]
+colnames(curve_i2) <- c("dim1", "dim2","dim3")
+
+curve_i3 <- slingCurves(crv)[[3]]
+curve_i3 <- curve_i3$s[curve_i3$ord, seq_len(3)]
+colnames(curve_i3) <- c("dim1", "dim2","dim3")
+
+
+curve_i1=data.frame(curve_i1)
+curve_i2=data.frame(curve_i2)
+curve_i3=data.frame(curve_i3)
+
+curve_i1$line = 1
+curve_i2$line = 2
+curve_i3$line = 3
+
+scene = list(camera = list(eye = list(x = 1.5, y = 1.6, z = 1.3)))
+
+
+# Plot PHATE reduction colored by k-means clustering 
+
+rd <- slingshot::slingReducedDim(crv)
+rd=data.frame(rd)
+rd$cluster=clusters_phate2
+
+transforms = list(
+  list(
+    type = 'groupby',
+    groups = rd$cluster,
+    styles = list(
+      list(target = "Cluster 1", value = list(marker =list(color = '#F8766D',size=4))),
+      list(target = "Cluster 2", value = list(marker =list(color = '#E38900',size=4))),
+      list(target = "Cluster 3", value = list(marker =list(color = '#C49A00',size=4))),
+      list(target = "Cluster 4", value = list(marker =list(color = '#99A800',size=4))),
+      list(target = "Cluster 7", value = list(marker =list(color = '#53B400',size=4))),
+      list(target = "Cluster 6", value = list(marker =list(color = '#06A4FF',size=4))),
+      list(target = "Cluster 5", value = list(marker =list(color = '#DF70F8',size=4))),
+      list(target = "Cluster 8", value = list(marker =list(color = '#00BC56',size=4)))
+    )
+  )
+)
+
+SupFig7A=plot_ly(
+  x = ~PHATE_1, 
+  y = ~PHATE_2, 
+  z = ~PHATE_3, 
+  data = rd,
+  transforms = transforms
+)  |> 
+  add_markers()   |>
+  add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i1, 
+            mode="lines",
+            line = list(color = "magenta", width = 4),
+            transforms = ~line
+  )  |> add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i2, 
+                  mode="lines",
+                  line = list(color = "dodgerblue", width = 4),
+                  transforms = ~line
+  )  |>add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i3, 
+                 mode="lines",
+                 line = list(color = "#358711", width = 4),
+                 transforms = ~line
+  )  |>
+  layout(showlegend = FALSE)%>% layout(scene = list(xaxis=list(
+    title = "Dimension 1"
+  ),yaxis=list(
+    title = "Dimension 2"
+  ),zaxis=list(
+    title = "Dimension 3"
+  )))%>% 
+  layout( scene = scene)
+
+
+# Rename Meistermann et al. (2018) cells
+
+DATA=merge(reducedDims(sce)$PHATE,Meta_Meistermann,by.x=0,by.y="FastqName",all=T)
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"EightCells","8-cell")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"early_TE","Early_TE")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"medium_TE","Medium_TE")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"late_TE","Late_TE")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"EPI.Early_TE","Intermediate")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"EPI.PrE.TE","Intermediate")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"EPI.PrE","Intermediate")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"PrE.TE","Intermediate")
+DATA$UMAP.cluster=str_replace_all(DATA$UMAP.cluster,"B1.EPI","Intermediate")
+DATA$UMAP.cluster=replace_na(DATA$UMAP.cluster,"Not analyzed")
+DATA$UMAP.cluster=factor(DATA$UMAP.cluster,levels=c("8-cell","Morula","B1_B2","Early_TE","Medium_TE","Late_TE","EPI.Early_TE","PrE","EPI","Intermediate","Not analyzed"))
+
+# Plot PHATE reduction colored by Meistermann et al. (2018) classification 
+
+rd$cluster=DATA$UMAP.cluster
+
+transforms = list(
+    list(
+      type = 'groupby',
+      groups = rd$cluster,
+      styles = list(
+        list(target = "8-cell", value = list(marker =list(color = '#F8766D',size=4))),
+        list(target = "Morula", value = list(marker =list(color = '#E38900',size=4))),
+        list(target = "B1_B2", value = list(marker =list(color = '#C49A00',size=4))),
+        list(target = "Intermediate", value = list(marker =list(color = '#998670',size=4))),
+        list(target = "Early_TE", value = list(marker =list(color = '#99A800',size=4))),
+        list(target = "EPI", value = list(marker =list(color = '#DF70F8',size=4))),
+        list(target = "Late_TE", value = list(marker =list(color = '#00BC56',size=4))),
+        list(target = "Medium_TE", value = list(marker =list(color = '#53B400',size=4))),
+        list(target = "PrE", value = list(marker =list(color = '#06A4FF',size=4))),
+        list(target = "Not analyzed", value = list(marker =list(color = 'grey',size=4)))
+      )
+    )
+)
+
+SupFig7B=plot_ly(
+   x = ~PHATE_1, 
+   y = ~PHATE_2, 
+   z = ~PHATE_3, 
+   data = rd,
+   transforms = transforms
+   )  |> 
+   add_markers()   |>
+  add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i1, 
+             mode="lines",
+            line = list(color = "magenta", width = 4),
+            transforms = ~line
+        )  |> add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i2, 
+             mode="lines",
+            line = list(color = "dodgerblue", width = 4),
+            transforms = ~line
+        )  |>add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i3, 
+             mode="lines",
+            line = list(color = "#358711", width = 4),
+            transforms = ~line
+        )  |>
+    layout(showlegend = FALSE)%>% layout(scene = list(xaxis=list(
+  title = "Dimension 1"
+),yaxis=list(
+  title = "Dimension 2"
+),zaxis=list(
+  title = "Dimension 3"
+)))%>% 
+  layout( scene = scene)
+
+# Rename Petropoulos et al. (2016) classification
+
+DATA$Author.lineage=replace_na(DATA$Author.lineage,"Not provided")
+DATA$Author.lineage=str_replace_all(DATA$Author.lineage,"NA","Not provided")
+DATA$Author.lineage=str_replace_all(DATA$Author.lineage,"prE","PrE")
+DATA$Author.lineage=factor(DATA$Author.lineage,levels=c("Not provided","TE","PrE","EPI"))
+
+# Plot PHATE reduction colored by Petropoulos et al. (2016) classification 
+
+rd$cluster=DATA$Author.lineage
+
+transforms = list(
+  list(
+    type = 'groupby',
+    groups = rd$cluster,
+    styles = list(
+      list(target = "Not provided", value = list(marker =list(color = '#F8766D',size=4))),
+      list(target = "TE", value = list(marker =list(color = '#00BC56',size=4))),
+      list(target = "PrE", value = list(marker =list(color = '#06A4FF',size=4))),
+      list(target = "EPI", value = list(marker =list(color = '#DF70F8',size=4)))
+    )
+  )
+)
+
+SupFig7C=plot_ly(
+  x = ~PHATE_1, 
+  y = ~PHATE_2, 
+  z = ~PHATE_3, 
+  data = rd,
+  transforms = transforms
+)  |> 
+  add_markers()   |>
+  add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i1, 
+            mode="lines",
+            line = list(color = "magenta", width = 4),
+            transforms = ~line
+  )  |> add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i2, 
+                  mode="lines",
+                  line = list(color = "dodgerblue", width = 4),
+                  transforms = ~line
+  )  |>add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i3, 
+                 mode="lines",
+                 line = list(color = "#358711", width = 4),
+                 transforms = ~line
+  )  |>
+  layout(showlegend = FALSE)%>% layout(scene = list(xaxis=list(
+    title = "Dimension 1"
+  ),yaxis=list(
+    title = "Dimension 2"
+  ),zaxis=list(
+    title = "Dimension 3"
+  )))%>% 
+  layout( scene = scene)
+
+
+# Plot PHATE reduction colored by pseudotime 
+
+rescale <- function(x) (x-min(x))/(max(x) - min(x)) * 100
+rd$cluster=rescale(pseudotime[,2])
+
+SupFig7D=plot_ly(
+  x = ~PHATE_1, 
+  y = ~PHATE_2, 
+  z = ~PHATE_3, 
+  data = rd,
+  markers=list(size=4,colorscale = "Reds",reversescale=F),coloraxis="coloraxis"
+)  |> 
+  add_markers(color=~cluster)   |>
+  add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i1, 
+            mode="lines",
+            line = list(color = "magenta", width = 4),
+            transforms = ~line
+  )  |> add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i2, 
+                  mode="lines",
+                  line = list(color = "dodgerblue", width = 4),
+                  transforms = ~line
+  )  |>add_trace(x = ~dim1, y = ~dim2, z = ~dim3, data = curve_i3, 
+                 mode="lines",
+                 line = list(color = "#358711", width = 4),
+                 transforms = ~line
+  )  |>
+  layout(showlegend = FALSE)%>% layout(scene = list(xaxis=list(
+    title = "Dimension 1"
+  ),yaxis=list(
+    title = "Dimension 2"
+  ),zaxis=list(
+    title = "Dimension 3"
+  )))%>% 
+  layout( scene = scene,coloraxis=list(colorscale='Reds'))
+
+## Legend of the scale
+
+SupFig7scale=plot_ly(
+  x = ~PHATE_1, 
+  y = ~PHATE_2, 
+  z = ~PHATE_3, 
+  data = rd,
+  marker=list(size=4,color=~cluster,reversescale=F,colorscale = "Reds",showscale = TRUE)
+) 
+
+```
+
+```{r Figure 6A : Heatmap DEG with pseudotime ,echo=FALSE,fig.width=17,fig.height=9}
+
+# Filter DEGs with pseudotime and smooth their expression
+
+resPseudo <- assoRes %>% rownames_to_column(var = "gene") %>% dplyr::filter(pvalue < 0.05 & meanLogFC>2)
+
+smoothPseudo <- lapply(1:length(resPseudo$gene), function(i){
+  DEGpseudo <- resPseudo[i,"gene"]
+  ysmooth <- predictSmooth(models = sce_GAM_all_genes, gene = DEGpseudo, nPoints = 101,tidy=TRUE)
+  return(ysmooth)
+}) %>% do.call(rbind, .)
+
+smoothPseudo <- smoothPseudo %>% dplyr::filter(lineage==1) %>%
+  pivot_wider(id_cols = gene, names_from = time,values_from = yhat) %>%
+  column_to_rownames(var = "gene")
+colnames(smoothPseudo) <- 0:(ncol(smoothPseudo)-1)
+
+# When is peak expression reached for each gene ?
+
+Mat_max=data.frame(Timepoint=colnames(smoothPseudo)[apply(smoothPseudo,1,which.max)], Gene=rownames(smoothPseudo))
+Mat_max$Timepoint=str_remove_all(Mat_max$Timepoint,"pt_")
+Mat_max$Timepoint=as.numeric(Mat_max$Timepoint)
+Mat_max=Mat_max[order(Mat_max$Timepoint,decreasing=TRUE),]
+
+# Order DEG by pseudotime of peak expression
+
+gene_order=Mat_max$Gene
+
+max_zscore=3
+heatmapPseudo <- as.data.frame(t(scale(t(smoothPseudo))))
+heatmapPseudo[heatmapPseudo > max_zscore] <- max_zscore
+heatmapPseudo[heatmapPseudo < -max_zscore] <- -max_zscore
+
+heatmapPseudo <- pivot_longer(heatmapPseudo %>% rownames_to_column(var = "gene"), -gene, values_to = "Expression Z-score", names_to = "pseudotime")
+heatmapPseudo$gene <- factor(heatmapPseudo$gene, levels = gene_order)
+heatmapPseudo$pseudotime <- as.numeric(heatmapPseudo$pseudotime)
+
+Fig6A = ggplot(heatmapPseudo, aes(x = pseudotime, y = gene, fill = `Expression Z-score`))+
+  geom_tile()+
+  scale_fill_viridis_c()+
+  scale_y_discrete(expand = c(0, 0),position = "left", labels = NULL,breaks=NULL, name="DEGs along pseudotime")+ scale_x_continuous(name="Pseudotime",breaks=seq(0,100,10),expand = c(0, 0))+theme_bw()+labs(fill="Expression Z-score")+
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_text(size=15,vjust=2))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(5,0,0,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,0,0,0)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))
+```
+
+```{r Figure 6C and 6D : DEG D2 and D5 with pseudotime ,echo=FALSE,fig.width=17,fig.height=9}
+
+dataPLOT=smoothPseudo %>% dplyr::filter(rownames(smoothPseudo)%in%intersect(Mat_max$Gene,resD2[which(resD2$adj.P.Val<0.1),]$genes)) %>% rownames_to_column("gene") %>% gather(pseudotime,yhat,-c("gene"))
+dataPLOT$pseudotime=as.numeric(dataPLOT$pseudotime)
+list_fig=list()
+
+for (k in 1:length(intersect(Mat_max$Gene,resD2[which(resD2$adj.P.Val<0.1),]$genes))){
+p=ggplot(data=(dataPLOT %>% dplyr::filter(gene==sort(intersect(Mat_max$Gene,resD2[which(resD2$adj.P.Val<0.1),]$genes))[k])), aes(x=pseudotime,y=yhat))+ 
+    geom_line(color = "#FF9224", lwd = 1.5)+
+    scale_y_log10()+
+     scale_x_continuous(name="Pseudotime",breaks=seq(0,100,25),expand = c(0, 0))+
+    labs(title = substitute(italic(x), list(x=sort(intersect(Mat_max$Gene,resD2[which(resD2$adj.P.Val<0.1),]$genes))[k])),  x = "Pseudotime", y = expression("Normalized counts")) +
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5,size=20))
+  theme(axis.title.x=element_text(size=25))+ 
+  theme(axis.title.y=element_text(size=25,vjust=2))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(5,0,0,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,0,0,0)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+ guides(color = FALSE)
+list_fig[[k]]=p
+} 
+Fig6C=plot_grid(list_fig[[1]], list_fig[[3]],list_fig[[4]],list_fig[[2]],list_fig[[5]],list_fig[[7]],list_fig[[9]],
+          list_fig[[11]], list_fig[[6]],list_fig[[8]],list_fig[[13]],list_fig[[14]],list_fig[[15]],list_fig[[10]],list_fig[[12]],list_fig[[16]],list_fig[[17]],list_fig[[18]],list_fig[[19]],
+          ncol = 5, nrow = 4,align="hv",scale = 0.9)
+
+dataPLOT=smoothPseudo %>% dplyr::filter(rownames(smoothPseudo)%in%intersect(Mat_max$Gene,resD5[which(resD5$adj.P.Val<0.1),]$genes)) %>% rownames_to_column("gene") %>% gather(pseudotime,yhat,-c("gene"))
+dataPLOT$pseudotime=as.numeric(dataPLOT$pseudotim)
+list_fig=list()
+
+for (k in 1:length(intersect(Mat_max$Gene,resD5[which(resD5$adj.P.Val<0.1),]$genes))){
+p=ggplot(data=(dataPLOT %>% dplyr::filter(gene==sort(intersect(Mat_max$Gene,resD5[which(resD5$adj.P.Val<0.1),]$genes))[k])), aes(x=pseudotime,y=yhat))+ 
+    geom_line(color = "#9B7BB0", lwd = 1.5)+
+    scale_y_log10()+
+     scale_x_continuous(name="Pseudotime",breaks=seq(0,100,25),expand = c(0, 0))+
+    labs(title = substitute(italic(x), list(x=sort(intersect(Mat_max$Gene,resD5[which(resD5$adj.P.Val<0.1),]$genes))[k])),  x = "Pseudotime", y = expression("Normalized counts")) +
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5,size=20))
+  theme(axis.title.x=element_text(size=25))+ 
+  theme(axis.title.y=element_text(size=25,vjust=2))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(5,0,0,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,0,0,0)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+ guides(color = FALSE)
+list_fig[[k]]=p
+} 
+Fig6D=plot_grid(list_fig[[1]], list_fig[[2]],list_fig[[3]],NULL,NULL,
+          list_fig[[4]],list_fig[[5]],list_fig[[6]],NULL,NULL,list_fig[[7]],list_fig[[8]],list_fig[[9]],
+          ncol = 5, nrow = 4,scale = 0.9,align="hv")
+```
+
+
+```{r Figure 7 : DEGs expression D5 from oocytes ,echo=FALSE,fig.width=17,fig.height=9}
+
+DATAcourbeD2=t(data.frame(logcpmD2[rownames(resD5[which(resD5$adj.P.Val<0.1),]),]))
+DATAcourbeD5=t(data.frame(logcpmD5[rownames(resD5[which(resD5$adj.P.Val<0.1),]),]))
+DATAcourbeYan=t(data.frame(logcpmYan[rownames(resD5[which(resD5$adj.P.Val<0.1),]),]))
+DATAcourbeYan=merge(DATAcourbeYan,coldataYan,by.x=0,by.y="ID")
+
+Plot_gene_D2D5= function(gene,DATAcourbeD2,DATAcourbeD5,DATAcourbeYan) {
+  DATAcourbeYan=aggregate(x= DATAcourbeYan[,which(colnames(DATAcourbeYan)==gene)]  ,   
+                        by = list(DATAcourbeYan$Cell),      
+                        FUN = mean)
+  DATAcourbeYan$Group.1=factor(DATAcourbeYan$Group.1,level=c("Oocyte","Zygote","2-cell","4-cell","8-cell","Morulae","Blastocyst","Late blastocyst"))
+  
+  DATAcourbeD2=merge(DATAcourbeD2,coldataD2,by.x=0,by.y="Sample")
+  DATAcourbeD2=aggregate(x= DATAcourbeD2[,which(colnames(DATAcourbeD2)==gene)],     
+                         by = list(DATAcourbeD2$Culture_medium),      
+                         FUN = mean)
+  DATAcourbeD2$Group.1=factor(DATAcourbeD2$Group.1)
+  DATAcourbeD2$Group.2=c("4-cell","4-cell","4-cell")
+  DATAcourbeD5=merge(DATAcourbeD5,coldataD5,by.x=0,by.y="Sample")
+  DATAcourbeD5=aggregate(x= DATAcourbeD5[,which(colnames(DATAcourbeD5)==gene)],     
+                         by = list(DATAcourbeD5$Culture_medium_D2),      
+                         FUN = mean)
+  DATAcourbeD5$Group.1=factor(DATAcourbeD5$Group.1)
+  DATAcourbeD5$Group.2=c("Blastocyst","Blastocyst")
+  DATAcourbeD5$Group.2=factor(DATAcourbeD5$Group.2,level=c("Oocyte","Zygote","2-cell","4-cell","8-cell","Morulae","Blastocyst","Late blastocyst"))
+  
+
+  colnames(DATAcourbeYan)=c("Group.1","Yan et al. (2013)")
+  DATAcourbeYan=melt(DATAcourbeYan, id="Group.1")
+  DATAcourbeYan=DATAcourbeYan[complete.cases(DATAcourbeYan), ]
+  DATAcourbeYan$lineage=DATAcourbeYan$Group.1
+  DATAcourbeD2 = DATAcourbeD2 %>% filter(Group.1!="SSM")
+  
+  plot=ggplot(data=DATAcourbeYan, aes(x=Group.1,y=value))+ 
+    geom_point(aes(fill = variable),size=7,shape=15)+geom_line(aes(fill = variable,group=variable))+
+    geom_point(data=DATAcourbeD2,aes(x = Group.2,y=x,fill=Group.1),shape=21,color="#5BB058",size=8,stroke = 2)+ 
+    geom_point(data=DATAcourbeD5,aes(x = Group.2,y=x,fill=Group.1),shape=21,color="#5BB058",size=8,stroke = 2)+
+    scale_fill_manual(values = c("Ferticult" = "#E37B72",
+                                  "Global"="#5BB058",
+                                  "Yan et al. (2013)"="black"))+
+    scale_x_discrete(limits = c("Oocyte","Zygote","2-cell","4-cell","8-cell","Morulae","Blastocyst","Late blastocyst"))+
+    theme_bw()+ 
+    theme(axis.title.x=element_text(size=20))+ 
+    theme(axis.title.y=element_text(size=20,vjust=0))+ 
+    theme(axis.text.x=element_text(size=15,margin=margin(0,0,10,0)))+ 
+    theme(axis.text.y=element_text(size=10,margin=margin(0,0,0,15)))+ 
+    theme(legend.title=element_text(size=15))+ 
+    theme(legend.text=element_text(size=12))+xlab("Embryonic stage")+ylab(expression("log"[2]*" (CPM+1)"))+
+    labs(title = substitute(italic(x), list(x=gene)))+
+    theme(plot.title = element_text(hjust = 0.5,size=27))+ theme(legend.position = "none")
+  
+  return(plot)
+}
+
+list_fig=vector('list', length(rownames(resD5[which(resD5$adj.P.Val<0.1),])))
+for (k in 1:length(rownames(resD5[which(resD5$adj.P.Val<0.1),]))){
+  plot=Plot_gene_D2D5(sort(rownames(resD5[which(resD5$adj.P.Val<0.1),]))[k],DATAcourbeD2,DATAcourbeD5,DATAcourbeYan)
+  list_fig[[k]]=plot
+}
+Fig7=plot_grid(list_fig[[1]], list_fig[[3]],list_fig[[8]],
+          list_fig[[9]],list_fig[[10]],list_fig[[12]],list_fig[[13]],list_fig[[16]],
+          list_fig[[17]],list_fig[[2]],list_fig[[4]],list_fig[[5]],list_fig[[6]],
+          list_fig[[7]],list_fig[[11]],list_fig[[14]],list_fig[[15]],list_fig[[18]],
+          ncol = 3, nrow = 6,scale = 1,align="hv")
+
+Fig7legend=list_fig[[1]]+ theme(legend.position = "top")
+```
+
+```{r Supplementary Figure S2 : Global PCA ,echo=FALSE,fig.width=3,fig.height=2}
+
+# Merge data from all 4 datasets
+
+df_list <- list(logcpmYan,logcpmXue,logcpmD2,logcpmD5)
+data=Reduce(merge, lapply(df_list, function(x) data.frame(x, rn = row.names(x))))
+rownames(data)=data[,1]
+data=data[,-1]
+cell=c(coldataYan$Cell,coldataXue$Cell,rep("D2",31),rep("D5",20))
+names(cell)=c(coldataYan$ID,coldataXue$ID,coldataD2$sample,coldataD5$ID)
+
+# Run PCA
+
+res.pca=PCAtools::pca(data,removeVar=0.1)
+PCA=as.data.frame(res.pca$rotated[,1:2])
+
+# Create legend 
+
+PCA$Stage=c(coldataYan$Cell,coldataXue$Cell,rep("4-cell",31),rep("Blastocyst",20))
+PCA$Study=c(rep("Yan's data",dim(coldataYan)[1]),rep("Xue's data",dim(coldataXue)[1]),rep("This study",51))
+
+# Plot 
+
+SupFig2=ggplot(PCA,aes(PC1,PC2))+ geom_point(size=2.5,stroke = 0,aes(shape=Study,color=Stage))  +xlab(paste0("PC1: ",round(res.pca$variance[1],0),"% variance")) +
+  ylab(paste0("PC2: ",round(res.pca$variance[2],0),"% variance"))+
+  scale_color_manual(values = c("Oocyte" = "#AECEE3",
+                                "Zygote"="#3876B0",
+                                "2-cell"="#BAD693",
+                                "4-cell"="#559F51",
+                                "8-cell"="#EA9D9D",
+                                "Morulae"="#D23731",
+                                "Blastocyst"="#F3C17B",
+                                "Late blastocyst"="#FF922D"
+  ))+                            
+  theme_bw()+ 
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(3,0,10,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,3,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))
+```
+
+```{r Supplementary Figure S3 Correlation plot,echo=FALSE}
+
+dfF=data.frame(rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% c("Ferticult")),])]))
+dfG=data.frame(rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% c("Global")),])]))
+dfS=data.frame(rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% c("SSM")),])]))
+colnames(dfF)="dfF"
+colnames(dfG)="dfG"
+colnames(dfS)="dfS"
+
+SupFig3A=ggplot(data = cbind(dfF,dfG), mapping = aes(x = dfF, y = dfG)) +
+  geom_pointdensity() + labs(colour = "Gene density")+ xlab(expression("log"[2]*" mean expression for Ferticult group"))+
+  ylab(expression("log"[2]*" mean expression for Global group"))+
+  scale_color_viridis()+theme_bw()+xlim(-1.8,17)+ylim(-1.8,17)+
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(3,0,10,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,3,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+ annotate("text",x=-Inf, y=Inf, hjust=-0.1, vjust=1.4,size = 7, label=paste("r == ", round(cor(dfF,dfG,method="spearman"),2)),parse=TRUE)
+
+SupFig3B=ggplot(data = cbind(dfF,dfS), mapping = aes(x = dfF, y = dfS)) +xlab(expression("log"[2]*" mean expression for Ferticult group"))+
+  ylab(expression("log"[2]*" mean expression for SSM group"))+
+  geom_pointdensity() + labs(colour = "Gene density")+
+  scale_color_viridis()+theme_bw()+xlim(-1.8,17)+ylim(-1.8,17)+
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(3,0,10,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,3,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+ annotate("text",x=-Inf, y=Inf, hjust=-0.1, vjust=1.4,size = 7, label=paste("r == ", round(cor(dfF,dfS,method="spearman"),2)),parse=TRUE)
+
+SupFig3C=ggplot(data = cbind(dfG,dfS), mapping = aes(x = dfG, y = dfS)) +xlab(expression("log"[2]*" mean expression for SSM group"))+
+  ylab(expression("log"[2]*" mean expression for Global group"))+
+  geom_pointdensity() + labs(colour = "Gene density")+
+  scale_color_viridis()+theme_bw()+xlim(-1.8,17)+ylim(-1.8,17)+
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(size=10,margin=margin(3,0,10,0)))+ 
+  theme(axis.text.y=element_text(size=10,margin=margin(0,3,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=12))+ annotate("text",x=-Inf, y=Inf, hjust=-0.1, vjust=1.4,size = 7, label=paste("r == ", round(cor(dfG,dfS,method="spearman"),2)),parse=TRUE)
+```
+
+```{r Supplementary Figure S4 :  Metascape, echo=FALSE,fig.width=12,fig.height=15}
+
+# Import Metascape results
+
+DataGO=read_delim("https://github.com/BastiDucreux/Single_embryo_RNAseq_paper/blob/main/metascape_day2.tsv?raw=true",delim = "\t", escape_double = FALSE, trim_ws = TRUE)
+vectorcolor=c("#FC0000","#377DB8","#994BA3","#EE8031","#FFFFB3","#EE7EC0","#B2DF69","#FFFF54","#F4B460","#A55728")
+list_fig=list()
+
+# Store the expression info for each gene of each GO
+
+for (k in 18:27){
+  
+  df=data.frame(resD2[DataGO[which(DataGO[,colnames(DataGO[k])]=="1"),]$original_id,])
+  df=df[order(df$logFC),]
+  if (dim(df)[1]<24){
+      df[(dim(df)[1]+1):24,] <- c(NA,NA,NA,NA,NA,NA,NA,NA) # Add empty rows to have the same bar width
+      df$gene=factor(rownames(df),levels=rownames(df))
+      df$just=ifelse(df$logFC<0,0.5,1.5)
+      df$just=ifelse(df$logFC<0,-0.07,1.07)
+      df$gene2=c(1:dim(data.frame(resD2[DataGO[which(DataGO[,colnames(DataGO[k])]=="1"),]$original_id,]))[1],-1:(dim(data.frame(resD2[DataGO[which(DataGO[,colnames(DataGO[k])]=="1"),]$original_id,]))[1]-24))
+  }
+  else{
+    df$gene=factor(rownames(df),levels=rownames(df))
+    df$just=ifelse(df$logFC<0,0.5,1.5)
+    df$just=ifelse(df$logFC<0,-0.07,1.07)
+    df$gene2=1:dim(df)[1]
+  }
+    Fig=ggplot(df, aes(x=gene2, y=logFC, fill=vectorcolor[k-17])) +
+  geom_bar(stat="identity",position="identity",width=0.6,fill=vectorcolor[k-17]) +
+  guides(fill = "none")+
+  xlab(expression("log"[2]*"FC"))+
+  scale_y_continuous(expression("log"[2]*"FC"), position="right", limits=c(-4.1,6), breaks=c(-4,-2,0,2,4,6),labels=c(-4,-2,0,2,4,6)) +
+  scale_x_continuous("", labels=NULL,breaks=NULL) +
+  coord_flip() +
+  theme_bw() +
+  geom_text(aes(x=gene2, y=0, label=gene), hjust=df$just,size=6,fontface = "bold")+
+  theme(panel.grid.major = element_line(color = "grey45",
+                                        size = 0.75))+ theme(panel.grid.minor = element_line(color = "white",
+                                                                                             size = 0.75))+ 
+  theme(axis.title.x=element_text(size=20))+ 
+  theme(axis.title.y=element_text(size=10,vjust=0),axis.line.x=element_line(size=0.8,color="grey45"))+ 
+  theme(axis.text.x=element_text(size=20,margin=margin(2,0,10,0),face = "bold",color="black"))+ 
+  theme(axis.text.y=element_text(size=10,face="italic",margin=margin(0,2,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=1))+ theme(
+    plot.title = element_text(hjust = 0.5))+theme(panel.border=element_rect(size=0))+ggtitle(paste0(colnames(DataGO[k])))+theme(plot.title = element_textbox_simple( halign = 0.5,size=18, face="bold"))
+    list_fig[[k-17]]=Fig
+} 
+
+# Plot the 4 clusters
+
+SupFig4A=plot_grid(list_fig[[1]], list_fig[[2]],list_fig[[3]],list_fig[[4]], ncol = 2, nrow = 2)
+SupFig4B=plot_grid(list_fig[[5]], list_fig[[6]],list_fig[[7]], ncol = 2, nrow = 2)
+SupFig4C=plot_grid(list_fig[[8]], list_fig[[9]],ncol = 2, nrow = 2)
+SupFig4D=plot_grid(list_fig[[10]],ncol = 2, nrow = 2)
+
+```
+
+
+```{r Supplementary Figure S5 : Heatmap transposable elements, fig.width=7,fig.height=6}
+
+TE=resD2[grep("TE_",resD2$genes),]
+TE=TE[order(-TE$logCPM),]
+TE=TE[1:20,]
+
+logCPMbymedia=data.frame(Ferticult=rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% "Ferticult"),])]),
+                         Global=rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% "Global"),])]),
+                         SSM=rowMeans(logcpmD2[,rownames(coldataD2[which(coldataD2$Culture_medium %in% "SSM"),])]))
+
+logCPMbymedia=logCPMbymedia[TE$genes,]
+logCPMbymedia$genes=rownames(logCPMbymedia)
+logCPMbymedia$genes=sub("TE_","",factor(logCPMbymedia$genes,levels=rev(logCPMbymedia$genes)))
+
+TEplot=rbind(resD2 %>% filter(genes %in% TE$genes),resFerticultSSM %>% filter(genes %in% TE$genes),resSSMGlobal %>% filter(genes %in% TE$genes))
+TEplot$medium=c(rep("Ferticult-Global",20),rep("Ferticult-SSM",20),rep("SSM-Global",20))
+TEplot$genes=sub("TE_","",TEplot$genes)
+
+TE$genes=sub("TE_","",factor(TE$genes,levels=rev(TE$genes)))
+
+SupFig5=plot_grid(
+TEplot %>% ggplot(.,aes(x=medium,y=factor(genes,levels=rev(TE$genes)),fill=logFC)) + geom_tile() + 
+  scale_fill_gradient2(high = "firebrick1", low="slategrey" ,mid = "Beige",name=expression("log"[2]*"FC"),limits=c(-1,1)) +xlab("") + ylab("")+theme_bw() + theme(legend.position="top") +  scale_x_discrete(expand = c(0, 0))+scale_y_discrete(expand = c(0, 0))+
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_text(size=15,vjust=0))+ 
+  theme(axis.text.x=element_text(size=13,margin=margin(5,0,10,0),face="bold"))+ 
+  theme(axis.text.y=element_text(size=14,margin=margin(0,3,0,15)))+ 
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=10))
+,
+logCPMbymedia %>% group_by(genes) %>% gather(key="medium",value="expression",-genes) %>%
+ggplot(aes(x=medium,y=factor(genes,levels=rev(TE$genes)),fill=expression)) + geom_tile()  +
+  xlab("") + ylab("") + 
+  scale_fill_gradient(high = "seagreen", low="Gray100" ,name=expression("log"[2]*"(CPM+1)"))+theme_bw()+ theme(legend.position="top")+theme_bw() + theme(legend.position="top") +  scale_x_discrete(expand = c(0, 0))+scale_y_discrete(expand = c(0, 0))+
+  theme(axis.title.x=element_text(size=15))+ 
+  theme(axis.title.y=element_blank())+ 
+  theme(axis.text.x=element_text(size=13,margin=margin(5,0,10,0),face="bold"))+ 
+  theme(axis.text.y=element_blank())+ 
+  theme(axis.ticks.y = element_blank())+
+  theme(legend.title=element_text(size=15))+ 
+  theme(legend.text=element_text(size=10))
+,
+nrow=1,ncol=2,align = "hv")
+```
+
+
+```{r Supplementary Figure S6B : GSEA methionine,echo=FALSE,fig.width=7,fig.height=4.5}
+
+# Convert to ENTREZID and sort by logFC
+
+entrez=bitr(rownames(resMeth),fromType = "SYMBOL",toType = "ENTREZID",OrgDb = org.Hs.eg.db)
+geneList=merge(resMeth,entrez,by.x=0,by.y="SYMBOL")
+geneList2=geneList$logFC
+names(geneList2)=geneList$ENTREZID
+geneList2 = sort(geneList2, decreasing = TRUE)
+
+# GSEA
+
+GSEAres <- clusterProfiler::gseGO(
+  geneList2,
+  pAdjustMethod = "fdr",
+  pvalueCutoff = 0.05, #p.adjust cutoff
+  OrgDb = org.Hs.eg.db,
+  ont="BP")
+
+# Plot
+
+SupFig6B=gseaplot2_custom(GSEAres,order=c("SRP-dependent cotranslational protein targeting to membrane","protein targeting to ER","cotranslational protein targeting to membrane","establishment of protein localization to endoplasmic reticulum","mitochondrial respiratory chain complex assembly","protein localization to endoplasmic reticulum","mitochondrial translational termination","mitochondrial ATP synthesis coupled electron transport","oxidative phosphorylation","electron transport chain"), geneSetID = 1:10, pvalue_table = FALSE, ES_geom = "dot", base_size = 15,subplots=1:2,rel_heights = c(1,0.5))
+SupFig6Blegend=gseaplot2_custom_legend(GSEAres,order=c("SRP-dependent cotranslational protein targeting to membrane","protein targeting to ER","cotranslational protein targeting to membrane","establishment of protein localization to endoplasmic reticulum","mitochondrial respiratory chain complex assembly","protein localization to endoplasmic reticulum","mitochondrial translational termination","mitochondrial ATP synthesis coupled electron transport","oxidative phosphorylation","electron transport chain"), geneSetID = 1:10, pvalue_table = FALSE, ES_geom = "dot", base_size = 15,subplots=1:2,rel_heights = c(1,0.5))
+
+# Save results
+
+openxlsx::write.xlsx(list(GSEAres@result), file = "Supplementary Table S5.xlsx")
+
+```
+
+```{r Save plots,echo=FALSE}
+
+# Figure 2
+
+pdf(file = "Fig1.pdf",width = 16,height = 5)
+plot_grid(Fig2A,Fig2B,align="hv",scale = 0.95)
+dev.off()
+
+# Figure 3
+
+pdf(file = "Fig2C.pdf",width = 9,height = 6)
+plot_grid(Fig3C)
+dev.off()
+
+pdf(file = "Fig2Clegend.pdf",width = 9,height = 6)
+plot_grid(Fig3Clegend)
+dev.off()
+
+# Figure 4
+
+pdf(file = "Fig3A.pdf",width = 14,height = 8)
+Fig4A
+dev.off()
+pdf(file = "Fig3B.pdf",width = 14,height =8)
+Fig4B
+dev.off()
+
+# Figure 5
+
+pdf(file = "Fig4.pdf",16,height = 5)
+plot_grid(Fig5A,Fig5B,align="hv",scale = 0.95)
+dev.off()
+
+pdf(file = "Fig4EF.pdf",16,height = 5)
+Fig4DE
+dev.off()
+
+# Figure 6
+
+pdf(file = "Fig6A.pdf",width= 9,height = 8)
+Fig6A
+dev.off()
+
+pdf(file = "Fig6C.pdf",width= 15,height = 10)
+Fig6C
+dev.off()
+
+pdf(file = "Fig6D.pdf",width= 15,height = 10)
+Fig6D
+dev.off()
+
+# Figure 7
+
+pdf(file = "Fig7.pdf",width= 34,height = 23) #45-26
+Fig7
+dev.off()
+
+# Supplementary Figure S2
+
+pdf(file = "SupFig1.pdf",width = 13,height =7)
+SupFig2
+dev.off()
+
+# Supplementary Figure S3
+
+pdf(file = "SupFig2.pdf",18,height = 5)
+plot_grid(SupFig3A,SupFig3B,SupFig3C,align="hv",nrow=1,scale = 0.95)
+dev.off()
+
+# Supplementary Figure S4
+
+pdf(file = "SupFig4a.pdf",width = 14,height = 15)
+SupFig4A
+dev.off()
+pdf(file = "SupFig4b.pdf",width = 14,height = 15)
+SupFig4B
+dev.off()
+pdf(file = "SupFig4c.pdf",width = 14,height = 15)
+SupFig4C
+dev.off()
+pdf(file = "SupFig4d.pdf",width = 14,height =15)
+SupFig4D
+dev.off()
+
+# Supplementary Figure S5
+
+pdf(file = "SupFig4.pdf",width = 14,height =15)
+SupFig5
+dev.off()
+
+# Supplementary Figure S5
+
+pdf(file = "SupFig6.pdf",width= 9,height = 6)
+SupFig6B
+dev.off()
+
+pdf(file = "SupFig6legend.pdf",width= 9,height = 6)
+SupFig6Blegend
+dev.off()
+
+# Supplementary Figure S7
+
+SupFig7A
+SupFig7B
+SupFig7C
+SupFig7D
+
+```
+
